@@ -2,6 +2,7 @@
 
 import { create } from 'zustand'
 import { subscribeWithSelector } from 'zustand/middleware'
+import { dedupeAgentsByCanonicalKey, getAgentCanonicalKey } from '@/lib/agent-canonical'
 import { MODEL_CATALOG } from '@/lib/models'
 
 export type JsonPrimitive = string | number | boolean | null
@@ -1023,24 +1024,35 @@ export const useMissionControl = create<MissionControlStore>()(
     // Mission Control Phase 2 - Agents
     agents: [],
     selectedAgent: null,
-    setAgents: (agents) => set({ agents }),
+    setAgents: (agents) => set({ agents: dedupeAgentsByCanonicalKey(agents) }),
     setSelectedAgent: (agent) => set({ selectedAgent: agent }),
     addAgent: (agent) =>
       set((state) => ({
-        agents: [agent, ...state.agents]
+        agents: dedupeAgentsByCanonicalKey([agent, ...state.agents.filter((existing) => getAgentCanonicalKey(existing) !== getAgentCanonicalKey(agent))])
       })),
     updateAgent: (agentId, updates) =>
       set((state) => ({
-        agents: state.agents.map((agent) =>
-          agent.id === agentId ? { ...agent, ...updates } : agent
-        ),
-        selectedAgent: state.selectedAgent?.id === agentId
+        agents: dedupeAgentsByCanonicalKey(state.agents.map((agent) => {
+          const matches =
+            agent.id === agentId ||
+            getAgentCanonicalKey(agent) === getAgentCanonicalKey({ id: agentId, ...updates })
+          return matches ? { ...agent, ...updates } : agent
+        })),
+        selectedAgent: state.selectedAgent && (
+          state.selectedAgent.id === agentId ||
+          getAgentCanonicalKey(state.selectedAgent) === getAgentCanonicalKey({ id: agentId, ...updates })
+        )
           ? { ...state.selectedAgent, ...updates }
           : state.selectedAgent
       })),
     deleteAgent: (agentId) =>
       set((state) => ({
-        agents: state.agents.filter((agent) => agent.id !== agentId),
+        agents: state.agents.filter((agent) => {
+          if (agent.id === agentId) return false
+          const target = state.agents.find((item) => item.id === agentId)
+          if (!target) return true
+          return getAgentCanonicalKey(agent) !== getAgentCanonicalKey(target)
+        }),
         selectedAgent: state.selectedAgent?.id === agentId ? null : state.selectedAgent
       })),
 
