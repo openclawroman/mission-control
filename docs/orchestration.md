@@ -282,6 +282,58 @@ curl -X POST "$MC_URL/api/tasks" \
 
 **When to use**: Complex workflows where different agents have different specializations.
 
+### Mission Control Handoff Format
+
+For explicit operator-to-coordinator delegation, use a structured `metadata.handoff` payload on the task.
+This keeps the handoff readable in the UI and machine-readable in the heartbeat response.
+
+Use this when `Main` delegates a complex or specific coordination job to `Orchestrator`:
+
+```bash
+curl -X POST "$MC_URL/api/tasks" \
+  -H "Authorization: Bearer $MC_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Handoff: normalize workspace path naming",
+    "description": "Main needs Orchestrator to coordinate the workspace-path cleanup across config, docs, and runtime state.",
+    "priority": "high",
+    "assigned_to": "Orchestrator",
+    "metadata": {
+      "handoff": {
+        "source_agent": "Main",
+        "target_agent": "Orchestrator",
+        "reason": "This requires cross-file coordination and safe sequencing.",
+        "summary": "Keep only the canonical workspace path visible.",
+        "context": "The lead workspace still references a hashed suffix in several docs and config records.",
+        "desired_outcome": "All live references point to ~/.openclaw/workspace-lead.",
+        "constraints": [
+          "Do not touch main agent config files",
+          "Preserve the existing workspace contents"
+        ],
+        "evidence": [
+          "openclaw.json",
+          "workspace-lead/TOOLS.md",
+          "Mission Control agent heartbeat state"
+        ],
+        "next_step": "Update references and refresh the runtime.",
+        "related_task_ids": []
+      }
+    }
+  }'
+```
+
+Canonical fields:
+- `source_agent`: who is handing off work
+- `target_agent`: who should own the next step
+- `reason`: why the handoff is needed
+- `summary`: one-line task summary
+- `context`: enough detail to act without guessing
+- `desired_outcome`: what success looks like
+- `constraints`: guardrails the recipient must respect
+- `evidence`: links, files, or facts the recipient should inspect
+- `next_step`: the next concrete action
+- `related_task_ids`: optional task linkage for tracking
+
 ## Pattern 7: Stale Task Recovery
 
 MC automatically recovers from stuck agents. The `requeueStaleTasks` scheduler job:
