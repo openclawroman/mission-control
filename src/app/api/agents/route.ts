@@ -12,6 +12,7 @@ import { runOpenClaw } from '@/lib/command';
 import { config as appConfig } from '@/lib/config';
 import { resolveWithin } from '@/lib/paths';
 import path from 'node:path';
+import { dedupeAgentsByCanonicalKey } from '@/lib/agent-canonical';
 
 /**
  * GET /api/agents - List all agents with optional filtering
@@ -117,6 +118,7 @@ export async function GET(request: NextRequest) {
         }
       };
     });
+    const dedupedAgents = dedupeAgentsByCanonicalKey(agentsWithStats)
     
     // Get total count for pagination
     let countQuery = 'SELECT COUNT(*) as total FROM agents WHERE workspace_id = ?';
@@ -135,7 +137,7 @@ export async function GET(request: NextRequest) {
     const countRow = db.prepare(countQuery).get(...countParams) as { total: number };
 
     return NextResponse.json({
-      agents: agentsWithStats,
+      agents: dedupedAgents,
       total: countRow.total,
       page: Math.floor(offset / limit) + 1,
       limit

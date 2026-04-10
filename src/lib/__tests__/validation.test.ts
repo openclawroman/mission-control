@@ -66,6 +66,27 @@ describe('createTaskSchema', () => {
     expect(result.success).toBe(true)
   })
 
+  it('accepts structured handoff metadata', () => {
+    const result = createTaskSchema.safeParse({
+      title: 'Main to Orchestrator handoff',
+      metadata: {
+        handoff: {
+          source_agent: 'Main',
+          target_agent: 'Orchestrator',
+          reason: 'Needs coordination across config and runtime state',
+          summary: 'Normalize the lead workspace path',
+          context: 'The lead workspace still uses a hashed suffix in several references.',
+          desired_outcome: 'Use a canonical workspace path everywhere.',
+          constraints: ['Do not touch the main agent config files'],
+          evidence: ['openclaw.json', 'workspace-lead/TOOLS.md'],
+          next_step: 'Update path references and refresh the runtime.',
+          related_task_ids: [123],
+        },
+      },
+    })
+    expect(result.success).toBe(true)
+  })
+
   it('rejects invalid feedback_rating', () => {
     const result = createTaskSchema.safeParse({
       title: 'Invalid rating test',

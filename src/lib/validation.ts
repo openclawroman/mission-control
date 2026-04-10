@@ -26,9 +26,24 @@ export async function validateBody<T>(
   }
 }
 
+const taskHandoffSchema = z.object({
+  source_agent: z.string().min(1, 'source_agent cannot be empty').max(100),
+  target_agent: z.string().min(1, 'target_agent cannot be empty').max(100),
+  reason: z.string().min(1, 'reason cannot be empty').max(1000),
+  summary: z.string().min(1, 'summary cannot be empty').max(500),
+  context: z.string().max(5000).optional(),
+  desired_outcome: z.string().max(1000).optional(),
+  constraints: z.array(z.string().min(1).max(200)).max(20).default([] as string[]),
+  evidence: z.array(z.string().min(1).max(500)).max(20).default([] as string[]),
+  next_step: z.string().max(1000).optional(),
+  related_task_ids: z.array(z.number().int().positive()).max(50).default([] as number[]),
+  created_at: z.string().datetime().optional(),
+}).catchall(z.unknown())
+
 const taskMetadataSchema = z.object({
   implementation_repo: z.string().min(1, 'implementation_repo cannot be empty').max(200).optional(),
   code_location: z.string().min(1, 'code_location cannot be empty').max(500).optional(),
+  handoff: taskHandoffSchema.optional(),
 }).catchall(z.unknown())
 
 export const createTaskSchema = z.object({

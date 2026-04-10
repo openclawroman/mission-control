@@ -1,9 +1,10 @@
 import { test, expect } from '@playwright/test'
-import { API_KEY_HEADER } from './helpers'
+import { API_KEY_HEADER, createTestAgent, createTestTask, deleteTestTask } from './helpers'
 
 test.describe('Direct CLI Integration', () => {
   const createdConnectionIds: string[] = []
   const createdAgentIds: number[] = []
+  const createdTaskIds: number[] = []
 
   test.afterEach(async ({ request }) => {
     // Clean up connections
@@ -20,6 +21,11 @@ test.describe('Direct CLI Integration', () => {
       await request.delete(`/api/agents/${agentId}`, { headers: API_KEY_HEADER })
     }
     createdAgentIds.length = 0
+
+    for (const taskId of createdTaskIds) {
+      await deleteTestTask(request, taskId).catch(() => {})
+    }
+    createdTaskIds.length = 0
   })
 
   test('POST /api/connect creates connection and auto-creates agent', async ({ request }) => {
@@ -116,6 +122,58 @@ test.describe('Direct CLI Integration', () => {
     const costsBody = await costsRes.json()
     expect(costsBody.agents).toHaveProperty(agentName)
     expect(costsBody.agents[agentName].stats.totalTokens).toBeGreaterThanOrEqual(1500)
+  })
+
+  test('GET heartbeat exposes structured handoff metadata for Main -> Orchestrator style tasks', async ({ request }) => {
+    const { id: agentId, name: agentName } = await createTestAgent(request, {
+      role: 'coordinator',
+      status: 'idle',
+    })
+    createdAgentIds.push(agentId)
+
+    const { id: taskId, res: taskRes, body: taskBody } = await createTestTask(request, {
+      assigned_to: agentName,
+      metadata: {
+        handoff: {
+          source_agent: 'Main',
+          target_agent: agentName,
+          reason: 'Complex coordination needed',
+          summary: 'Normalize the workspace path naming',
+          context: 'The lead workspace still references a hashed suffix in several docs and config records.',
+          desired_outcome: 'Keep only the canonical workspace path visible.',
+          constraints: ['Do not touch main agent config files'],
+          evidence: ['openclaw.json', 'workspace-lead/TOOLS.md'],
+          next_step: 'Update workspace references and refresh the runtime.',
+          related_task_ids: [],
+        },
+      },
+    })
+    createdTaskIds.push(taskId)
+
+    expect(taskRes.status()).toBe(201)
+    expect(taskBody.task.metadata.handoff.source_agent).toBe('Main')
+    expect(taskBody.task.metadata.handoff.target_agent).toBe(agentName)
+
+    const hbRes = await request.get(`/api/agents/${agentId}/heartbeat`, {
+      headers: API_KEY_HEADER,
+    })
+    expect(hbRes.status()).toBe(200)
+    const hbBody = await hbRes.json()
+    expect(hbBody.status).toBe('WORK_ITEMS_FOUND')
+    const assignedTasks = hbBody.work_items.find((item: any) => item.type === 'assigned_tasks')
+    expect(assignedTasks).toBeDefined()
+    expect(assignedTasks.items[0].handoff).toEqual({
+      source_agent: 'Main',
+      target_agent: agentName,
+      reason: 'Complex coordination needed',
+      summary: 'Normalize the workspace path naming',
+      context: 'The lead workspace still references a hashed suffix in several docs and config records.',
+      desired_outcome: 'Keep only the canonical workspace path visible.',
+      constraints: ['Do not touch main agent config files'],
+      evidence: ['openclaw.json', 'workspace-lead/TOOLS.md'],
+      next_step: 'Update workspace references and refresh the runtime.',
+      related_task_ids: [],
+    })
   })
 
   test('DELETE /api/connect disconnects and sets agent offline', async ({ request }) => {

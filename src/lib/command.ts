@@ -99,3 +99,30 @@ export function runClawdbot(args: string[], options: CommandOptions = {}) {
     cwd: options.cwd || config.openclawStateDir || process.cwd()
   })
 }
+
+/**
+ * Run openclaw command with retry on transient failures.
+ * Retries up to `maxAttempts` times with exponential backoff.
+ */
+export async function runOpenClawWithRetry(
+  args: string[],
+  options: CommandOptions & { maxAttempts?: number; retryDelayMs?: number } = {}
+): Promise<CommandResult> {
+  const { maxAttempts = 3, retryDelayMs = 3000, ...cmdOptions } = options
+  let lastError: Error | undefined
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await runOpenClaw(args, cmdOptions)
+    } catch (err: any) {
+      lastError = err
+      if (attempt < maxAttempts) {
+        const delay = retryDelayMs * Math.pow(2, attempt - 1) // 3s, 6s, 12s
+        console.warn(`[runOpenClawWithRetry] Attempt ${attempt}/${maxAttempts} failed, retrying in ${delay}ms:`, err.message?.slice(0, 100))
+        await new Promise(r => setTimeout(r, delay))
+      }
+    }
+  }
+
+  throw lastError
+}

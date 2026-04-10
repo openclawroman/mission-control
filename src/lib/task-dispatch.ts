@@ -21,6 +21,39 @@ function syncAndEscalateIfFailed(task: { id: number; title: string; status: stri
   }
 }
 
+const DEBUG_STAGE_CHANNEL = 'telegram'
+const DEBUG_STAGE_TARGET = '428798118'
+
+function formatTaskTicket(task: { id: number; ticket_prefix?: string | null; project_ticket_no?: number | null }): string {
+  return task.ticket_prefix && task.project_ticket_no
+    ? `${task.ticket_prefix}-${String(task.project_ticket_no).padStart(3, '0')}`
+    : `TASK-${task.id}`
+}
+
+async function sendStageDebugMessage(input: {
+  task: { id: number; title: string; assigned_to?: string | null; ticket_prefix?: string | null; project_ticket_no?: number | null }
+  from: string
+  to: string
+  note?: string | null
+}): Promise<void> {
+  const ticket = formatTaskTicket(input.task)
+  const assignee = input.task.assigned_to ? ` · ${input.task.assigned_to}` : ''
+  const note = input.note ? `\n${input.note}` : ''
+  const text = `🐛 MC stage: ${ticket} · ${input.from} → ${input.to}${assignee}\n${input.task.title}${note}`
+
+  try {
+    await runOpenClaw([
+      'message',
+      'send',
+      '--channel', DEBUG_STAGE_CHANNEL,
+      '--target', DEBUG_STAGE_TARGET,
+      '--message', text,
+    ], { timeoutMs: 15_000 })
+  } catch (err: any) {
+    logger.warn({ taskId: input.task.id, err }, 'Failed to send Telegram stage debug message')
+  }
+}
+
 interface DispatchableTask {
   id: number
   title: string
@@ -115,9 +148,7 @@ function resolveGatewayAgentId(task: DispatchableTask): string {
 }
 
 function buildTaskPrompt(task: DispatchableTask, rejectionFeedback?: string | null): string {
-  const ticket = task.ticket_prefix && task.project_ticket_no
-    ? `${task.ticket_prefix}-${String(task.project_ticket_no).padStart(3, '0')}`
-    : `TASK-${task.id}`
+  const ticket = formatTaskTicket(task)
 
   const lines = [
     'You have been assigned a task in Mission Control.',
@@ -442,6 +473,13 @@ export async function runAegisReviews(): Promise<{ ok: boolean; message: string 
       previous_status: 'review',
     })
 
+    await sendStageDebugMessage({
+      task,
+      from: 'review',
+      to: 'quality_review',
+      note: 'Aegis/QA picked up the task for quality review.',
+    })
+
     try {
       const prompt = buildReviewPrompt(task)
       let agentResponse: AgentResponseParsed
@@ -467,8 +505,8 @@ export async function runAegisReviews(): Promise<{ ok: boolean; message: string 
           deliver: false,
         }
         const finalResult = await runOpenClaw(
-          ['gateway', 'call', 'agent', '--expect-final', '--timeout', '120000', '--params', JSON.stringify(invokeParams), '--json'],
-          { timeoutMs: 125_000 }
+          ['gateway', 'call', 'agent', '--expect-final', '--timeout', '600000', '--params', JSON.stringify(invokeParams), '--json'],
+          { timeoutMs: 605_000 }
         )
         const finalPayload = parseGatewayJson(finalResult.stdout)
           ?? parseGatewayJson(String((finalResult as any)?.stderr || ''))
@@ -499,6 +537,12 @@ export async function runAegisReviews(): Promise<{ ok: boolean; message: string 
           previous_status: 'quality_review',
         })
         syncAndEscalateIfFailed(task, 'done')
+        await sendStageDebugMessage({
+          task,
+          from: 'quality_review',
+          to: 'done',
+          note: 'QA approved the task.',
+        })
       } else {
         // Rejected: check dispatch_attempts to decide next status
         const now = Math.floor(Date.now() / 1000)
@@ -519,6 +563,12 @@ export async function runAegisReviews(): Promise<{ ok: boolean; message: string 
             reason: 'max_aegis_retries_exceeded',
           })
           syncAndEscalateIfFailed(task, 'failed', `Aegis rejected ${newAttempts} times`, newAttempts)
+          await sendStageDebugMessage({
+            task,
+            from: 'quality_review',
+            to: 'failed',
+            note: `QA rejected the task ${newAttempts} times.`,
+          })
         } else {
           // Requeue to assigned for re-dispatch with feedback
           db.prepare('UPDATE tasks SET status = ?, error_message = ?, dispatch_attempts = ?, updated_at = ? WHERE id = ?')
@@ -532,6 +582,12 @@ export async function runAegisReviews(): Promise<{ ok: boolean; message: string 
             reason: 'aegis_rejection',
           })
           syncAndEscalateIfFailed(task, 'assigned')
+          await sendStageDebugMessage({
+            task,
+            from: 'quality_review',
+            to: 'assigned',
+            note: `QA requested fixes: ${verdict.notes.substring(0, 180)}`,
+          })
         }
 
         // Add rejection as a comment so the agent sees it on next dispatch
@@ -557,14 +613,42 @@ export async function runAegisReviews(): Promise<{ ok: boolean; message: string 
       const errorMsg = err.message || 'Unknown error'
       logger.error({ taskId: task.id, err }, 'Aegis review failed')
 
-      // Revert to review so it can be retried
-      db.prepare('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?')
-        .run('review', Math.floor(Date.now() / 1000), task.id)
+      const now = Math.floor(Date.now() / 1000)
+      const currentAttempts = (db.prepare('SELECT dispatch_attempts FROM tasks WHERE id = ?').get(task.id) as { dispatch_attempts: number } | undefined)?.dispatch_attempts ?? 0
+      const newAttempts = currentAttempts + 1
+      const maxAegisRetries = 3
 
-      eventBus.broadcast('task.status_changed', {
-        id: task.id,
-        status: 'review',
-        previous_status: 'quality_review',
+      if (newAttempts >= maxAegisRetries) {
+        // Too many failures — move to failed
+        db.prepare('UPDATE tasks SET status = ?, error_message = ?, dispatch_attempts = ?, updated_at = ? WHERE id = ?')
+          .run('failed', `Aegis review failed ${newAttempts} times. Last: ${errorMsg}`, newAttempts, now, task.id)
+
+        eventBus.broadcast('task.status_changed', {
+          id: task.id,
+          status: 'failed',
+          previous_status: 'quality_review',
+          error_message: `Aegis review failed ${newAttempts} times`,
+          reason: 'aegis_error_max_retries',
+        })
+      } else {
+        // Retry: revert to review with incremented attempt counter
+        db.prepare('UPDATE tasks SET status = ?, error_message = ?, dispatch_attempts = ?, updated_at = ? WHERE id = ?')
+          .run('review', `Aegis review attempt ${newAttempts}: ${errorMsg}`, newAttempts, now, task.id)
+
+        eventBus.broadcast('task.status_changed', {
+          id: task.id,
+          status: 'review',
+          previous_status: 'quality_review',
+          error_message: `Aegis review attempt ${newAttempts}: ${errorMsg}`,
+          reason: 'aegis_error_retry',
+        })
+      }
+
+      await sendStageDebugMessage({
+        task,
+        from: 'quality_review',
+        to: newAttempts >= maxAegisRetries ? 'failed' : 'review',
+        note: `QA stage errored after ${newAttempts} attempt(s): ${errorMsg.substring(0, 180)}`,
       })
 
       results.push({ id: task.id, verdict: 'error', error: errorMsg.substring(0, 100) })
@@ -705,6 +789,13 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
       previous_status: 'assigned',
     })
 
+    await sendStageDebugMessage({
+      task,
+      from: 'assigned',
+      to: 'in_progress',
+      note: `Dispatching to ${task.agent_name}.`,
+    })
+
     db_helpers.logActivity(
       'task_dispatched',
       'task',
@@ -783,8 +874,8 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
         // response payload (result.payloads[0].text). The two-step agent → agent.wait
         // pattern only returns lifecycle metadata and never includes the agent's text.
         const finalResult = await runOpenClaw(
-          ['gateway', 'call', 'agent', '--expect-final', '--timeout', '120000', '--params', JSON.stringify(invokeParams), '--json'],
-          { timeoutMs: 125_000 }
+          ['gateway', 'call', 'agent', '--expect-final', '--timeout', '600000', '--params', JSON.stringify(invokeParams), '--json'],
+          { timeoutMs: 605_000 }
         )
         const finalPayload = parseGatewayJson(finalResult.stdout)
           ?? parseGatewayJson(String((finalResult as any)?.stderr || ''))
@@ -839,6 +930,13 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
         previous_status: 'in_progress',
       })
 
+      await sendStageDebugMessage({
+        task,
+        from: 'in_progress',
+        to: 'review',
+        note: `Implementation finished by ${task.agent_name}; awaiting review.`,
+      })
+
       eventBus.broadcast('task.updated', {
         id: task.id,
         status: 'review',
@@ -882,6 +980,12 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
           reason: 'max_dispatch_retries_exceeded',
         })
         syncAndEscalateIfFailed(task, 'failed', `Dispatch failed ${newAttempts} times`, newAttempts)
+        await sendStageDebugMessage({
+          task,
+          from: 'in_progress',
+          to: 'failed',
+          note: `Dispatch failed ${newAttempts} times: ${errorMsg.substring(0, 180)}`,
+        })
       } else {
         // Revert to assigned so it can be retried on the next tick
         db.prepare('UPDATE tasks SET status = ?, error_message = ?, dispatch_attempts = ?, updated_at = ? WHERE id = ?')
@@ -895,6 +999,12 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
           reason: 'dispatch_failed',
         })
         syncAndEscalateIfFailed(task, 'assigned')
+        await sendStageDebugMessage({
+          task,
+          from: 'in_progress',
+          to: 'assigned',
+          note: `Dispatch failed, task re-queued: ${errorMsg.substring(0, 180)}`,
+        })
       }
 
       db_helpers.logActivity(
@@ -1050,6 +1160,12 @@ export async function autoRouteInboxTasks(): Promise<{ ok: boolean; message: str
 
       eventBus.broadcast('task.status_changed', { id: task.id, status: 'assigned', previous_status: 'inbox', assigned_to: alt.agent.name })
       syncAndEscalateIfFailed(task as any, 'assigned')
+      await sendStageDebugMessage({
+        task: { ...task, assigned_to: alt.agent.name },
+        from: 'inbox',
+        to: 'assigned',
+        note: `Auto-routed to ${alt.agent.name} (${alt.agent.role}).`,
+      })
       routed++
       continue
     }
@@ -1064,6 +1180,12 @@ export async function autoRouteInboxTasks(): Promise<{ ok: boolean; message: str
 
     eventBus.broadcast('task.status_changed', { id: task.id, status: 'assigned', previous_status: 'inbox', assigned_to: best.name })
     syncAndEscalateIfFailed(task as any, 'assigned')
+    await sendStageDebugMessage({
+      task: { ...task, assigned_to: best.name },
+      from: 'inbox',
+      to: 'assigned',
+      note: `Auto-routed to ${best.name} (${best.role}).`,
+    })
     routed++
   }
 

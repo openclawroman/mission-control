@@ -181,6 +181,10 @@ Returns up to 5 pending tasks sorted by priority (critical → low), then due da
 
 Note: Moving a task to `done` via PUT requires an Aegis quality review approval.
 
+For explicit delegation from `Main` to `Orchestrator`, use `metadata.handoff` with:
+`source_agent`, `target_agent`, `reason`, `summary`, `context`, `desired_outcome`,
+`constraints`, `evidence`, `next_step`, and optional `related_task_ids`.
+
 **POST response:**
 
 ```json

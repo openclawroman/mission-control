@@ -3,7 +3,7 @@ import { getDatabase, db_helpers } from '@/lib/db';
 import { requireRole } from '@/lib/auth';
 import { agentHeartbeatLimiter } from '@/lib/rate-limit';
 import { logger } from '@/lib/logger';
-import { resolveTaskImplementationTarget } from '@/lib/task-routing';
+import { resolveTaskImplementationTarget, resolveTaskHandoff } from '@/lib/task-routing';
 
 /**
  * GET /api/agents/[id]/heartbeat - Agent heartbeat check
@@ -87,14 +87,18 @@ export async function GET(
       workItems.push({
         type: 'assigned_tasks',
         count: assignedTasks.length,
-        items: assignedTasks.map((t: any) => ({
-          id: t.id,
-          title: t.title,
-          status: t.status,
-          priority: t.priority,
-          due_date: t.due_date,
-          ...resolveTaskImplementationTarget(t),
-        }))
+        items: assignedTasks.map((t: any) => {
+          const handoff = resolveTaskHandoff(t)
+          return {
+            id: t.id,
+            title: t.title,
+            status: t.status,
+            priority: t.priority,
+            due_date: t.due_date,
+            ...resolveTaskImplementationTarget(t),
+            ...(handoff ? { handoff } : {}),
+          }
+        }),
       });
     }
     
